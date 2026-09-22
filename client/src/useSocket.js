@@ -28,6 +28,7 @@ export function useSocket({ role, screenRef }) {
   const [markerMeta, setMarkerMeta] = useState(null);  // { sessionId } 本场会话信息
   const [inspection, setInspection] = useState(null);  // 控制台：设备巡检门禁状态（投屏收不到更新）
   const [gateEvent, setGateEvent] = useState(null);    // 门禁放行/失效翻转事件（含原因），供横幅提示
+  const [devices, setDevices] = useState(null);        // 控制台：设备占用配置 + 当前冲突（投屏收不到更新）
   const [cue, setCue] = useState(null);                // 投屏：当前上屏的提示
   const [sceneLib, setSceneLib] = useState(null);      // 控制台：场景库（编排 + 激活版本）
   const [scene, setScene] = useState(null);            // 投屏：当前激活场景的完整快照
@@ -292,6 +293,20 @@ export function useSocket({ role, screenRef }) {
           return;
         }
 
+        if (msg.type === 'devices') {
+          // 设备占用配置与当前冲突由服务端权威整体替换；旧纪元（重启前）残留丢弃。
+          // 该消息仅控制台类连接接收（投屏注册后服务端不再下发）。
+          if (baselineRef.current.currentEpoch !== null && msg.epoch !== baselineRef.current.currentEpoch) {
+            return;
+          }
+          setDevices({
+            seq: msg.seq,
+            devices: Array.isArray(msg.devices) ? msg.devices : [],
+            conflicts: Array.isArray(msg.conflicts) ? msg.conflicts : [],
+          });
+          return;
+        }
+
         if (msg.type === 'handover' && role === 'console') {
           // 交接事件守卫：旧纪元/更旧 seq 丢弃；同 seq 的 pending 为带码补发（幂等补 code）
           const verdict = judgeHandover(handoverBaselineRef.current, msg);
@@ -432,6 +447,7 @@ export function useSocket({ role, screenRef }) {
     markerMeta,
     inspection,
     gateEvent,
+    devices,
     cue,
     sceneLib,
     scene,

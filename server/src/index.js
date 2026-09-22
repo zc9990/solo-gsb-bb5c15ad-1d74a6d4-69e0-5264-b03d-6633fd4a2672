@@ -25,6 +25,12 @@ import {
   sceneLibrarySignature,
   findScene,
 } from './scenes.js';
+import {
+  defaultDevices,
+  setDevices,
+  pruneDeviceBindings,
+  computeDeviceConflicts,
+} from './devices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../../client/dist');
@@ -542,6 +548,51 @@ function broadcastGateChange(prev, next) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 设备占用（devices）
+// 持有者可维护最多 20 项共享设备（名称 / 周转缓冲分钟）并把设备绑定到议程环节。
+// 服务端不存占用区间：每次议程、当前环节或计时状态变化后，复用同一帧权威议程推演
+// （projectAgenda）现算各环节预计起止区间，并按设备的相邻占用缺口与周转缓冲比对，
+// 实时给出冲突双方、实际缺口/缺口分钟数，按最早冲突排序。
+// 固定开始环节与跨午夜时间使用推演行的原始毫秒值比较（projStart/projEnd 可越过 24h）。
+// 议程被整体替换后，绑定到已删除环节的记录自动清理。
+// 数据仅存服务端内存（与议程/巡检同级），服务进程重启即清空。
+// 设备消息与巡检/标记同级按角色过滤：已注册为投屏的连接不接收任何设备消息。
+// ---------------------------------------------------------------------------
+const devicesState = defaultDevices();
+
+function publicDevice(d) {
+  return { id: d.id, name: d.name, turnoverMs: d.turnoverMs, itemIds: d.itemIds };
+}
+
+// 设备占用视图：设备清单 + 基于指定议程推演行的冲突列表。
+// 由调用方传入 projected（与本帧快照同一推演结果），保证冲突与快照口径严格一致。
+function deviceView(projected) {
+  return {
+    devices: devicesState.devices.map(publicDevice),
+    conflicts: computeDeviceConflicts(devicesState.devices, projected),
+  };
+}
+
+function devicesPayload(projected) {
+  const view = deviceView(projected);
+  return {
+    type: 'devices',
+    epoch,
+    seq: devicesState.seq,
+    devices: view.devices,
+    conflicts: view.conflicts,
+  };
+}
+
+// 设备消息只下发给控制台类连接：投屏永远不接收设备数据
+function broadcastDevices(projected) {
+  const msg = devicesPayload(projected);
+  for (const c of clients) {
+    if (!c.screenId) send(c.ws, msg);
+  }
+}
+
 // 当前议程推演视图：projectAgenda 结果 + 当前环节实时偏差。
 // 快照与现场标记在产生瞬间共用同一份权威计算，保证两边偏差口径一致。
 function agendaView() {
@@ -561,9 +612,8 @@ function agendaView() {
 }
 
 // warning（60 秒内）与 finished 是快照派生状态，进入临界值由 tick 驱动发播
-function buildSnapshot() {
+function buildSnapshot(view = agendaView()) {
   const remainingMs = remainingNow();
-  const view = agendaView();
 
   return {
     type: 'snapshot',
@@ -594,9 +644,14 @@ function buildSnapshot() {
 let holder = null;          // { id, ws, lastHeartbeatMono }
 
 function broadcastSnapshot() {
-  const snap = buildSnapshot();
+  // 同一帧推演结果同时用于快照与设备占用冲突：议程/当前环节/计时任一字段变化后，
+  // 冲突都随下一帧快照一并权威刷新（投屏只收快照，设备消息按角色过滤给控制台）。
+  const view = agendaView();
+  const snap = buildSnapshot(view);
+  const devMsg = devicesPayload(view.projected);
   for (const client of clients) {
     send(client.ws, snap);
+    if (!client.screenId) send(client.ws, devMsg);
   }
 }
 
@@ -923,6 +978,10 @@ function setAgenda(rawItems) {
   agenda.currentId = null;
   agenda.devInMs = 0;
   resetTimer(timer.durationMs);
+  // 自动清理：绑定到被删除环节的设备记录随之摘除（设备本体与周转缓冲保留）
+  const validIds = new Set(result.items.map((it) => it.id));
+  const pruned = pruneDeviceBindings(devicesState.devices, validIds);
+  if (pruned !== devicesState.devices) devicesState.devices = pruned;
   return { ok: true, seq: agenda.seq };
 }
 
@@ -1226,6 +1285,24 @@ function handleCommand(client, msg) {
       return;
     }
 
+    case 'devices_set': {
+      // 整体替换共享设备清单（最多 20 项：名称 / 周转缓冲分钟 / 议程环节绑定）；
+      // 仅持有者。校验失败返回 BAD_DEVICE，服务端状态不变；内容无变化不递增版本。
+      // 冲突结果由下一帧权威推演随设备消息整体替换给出（编辑不改变推演时也立即下发）。
+      const r = setDevices(devicesState, msg.devices, new Set(agenda.items.map((it) => it.id)));
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      if (r.changed) {
+        devicesState.seq = r.state.seq;
+        devicesState.devices = r.state.devices;
+      }
+      // 配置可能变化而推演区间不变：始终按当前推演立即整体替换下发一次（控制台类连接）
+      broadcastDevices(agendaView().projected);
+      return;
+    }
+
     case 'screen_register': {
       // 投屏注册（每次连接/重连均调用）：携带持久屏幕 ID 与显示名
       registerScreen(client, msg.screenId, msg.name);
@@ -1356,6 +1433,9 @@ wss.on('connection', (ws) => {
   send(ws, markersPayload());
   // 设备巡检门禁状态同样随首包下发（此刻尚未注册为投屏）
   send(ws, inspectionPayload());
+  // 设备占用配置与当前冲突结果随首包下发：控制台断线重连据此恢复完整配置；
+  // 投屏随后完成 screen_register，之后不再收到任何设备更新。
+  send(ws, devicesPayload(agendaView().projected));
   // 控制台交接状态：持有者重连可继续等待；接收方新打开页面也能立即看到“等待输入”。
   // 交接码只下发给当前持有者（生成者），其他连接首包同样不带码。
   const handoverHello = handoverPayload();

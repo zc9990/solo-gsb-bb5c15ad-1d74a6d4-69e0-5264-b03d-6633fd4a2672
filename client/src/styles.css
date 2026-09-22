@@ -878,6 +878,100 @@ body {
 .btn-fault { color: #ff7676; border-color: rgba(255, 68, 68, .5); }
 .hint-gate { color: #ff9b9b; font-size: 13px; }
 
+/* ---------------- 设备占用（device occupancy） ---------------- */
+.dev-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+}
+.dev-conflict-head {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ff7676;
+}
+.dev-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 68, 68, .55);
+  background: rgba(255, 68, 68, .09);
+}
+.dev-conflict-name { font-weight: 700; color: #ff9b9b; }
+.dev-conflict-pair { font-size: 13px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.dev-conflict-time {
+  font-style: normal;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.dev-conflict-gap { font-size: 13px; color: #ffb3b3; }
+.dev-conflict-gap b { color: #ff7676; }
+
+.dev-edit-table { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 12px; }
+.dev-edit-row { align-items: flex-start; }
+.dev-turn-input { width: 90px; }
+.dev-bind-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+}
+.dev-bind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid #33405f;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dev-bind-chip input { margin: 0; }
+
+.dev-cards { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px; }
+.dev-card {
+  border: 1px solid #2c3856;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, .02);
+}
+.dev-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.dev-card-name { font-weight: 700; font-size: 15px; }
+.dev-card-turn { font-size: 12px; color: var(--muted); }
+.dev-occ-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dev-occ {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #33405f;
+  background: #141c2e;
+  font-style: normal;
+}
+.dev-occ-name { font-style: normal; font-size: 13px; }
+.dev-occ-time {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.dev-occ-hot {
+  border-color: rgba(255, 68, 68, .7);
+  background: rgba(255, 68, 68, .13);
+}
+.dev-occ-hot .dev-occ-name { color: #ff8f8f; }
+
 /* ---------------- 投屏场景编排（scene stage） ---------------- */
 .scene-stage {
   flex: 1;
