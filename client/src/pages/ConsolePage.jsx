@@ -6,12 +6,13 @@ import CuePanel from './CuePanel.jsx';
 import ScenePanel from './ScenePanel.jsx';
 import MarkerPanel from './MarkerPanel.jsx';
 import InspectionPanel from './InspectionPanel.jsx';
+import DevicePanel from './DevicePanel.jsx';
 import HandoverPanel from './HandoverPanel.jsx';
 
 // 控制台：同一时刻全服务仅一个实例可持有控制权。
 export default function ConsolePage() {
   const {
-    snap, screens, markers, inspection, gateEvent, connState, control, myId, handover, lastError,
+    snap, screens, markers, inspection, gateEvent, devices, connState, control, myId, handover, lastError,
     sceneLib,
     send, acquire, release, clearError,
     createHandover, cancelHandover, redeemHandover, clearHandover,
@@ -265,6 +266,15 @@ export default function ConsolePage() {
       />
 
       <AgendaPanel
+        snap={snap}
+        canEdit={control.granted}
+        send={send}
+        lastError={lastError}
+        onClearError={clearError}
+      />
+
+      <DevicePanel
+        devices={devices}
         snap={snap}
         canEdit={control.granted}
         send={send}

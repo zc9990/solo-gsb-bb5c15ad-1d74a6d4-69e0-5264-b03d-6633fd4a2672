@@ -25,6 +25,13 @@ import {
   sceneLibrarySignature,
   findScene,
 } from './scenes.js';
+import {
+  defaultDevices,
+  normalizeDevices,
+  devicesSignature,
+  pruneMissingItems,
+  buildOccupancy,
+} from './devices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../../client/dist');
@@ -200,6 +207,7 @@ function registerScreen(client, rawId, rawName) {
   // 场景完整快照随注册流程单播，投屏替换并上报后，控制台确认状态恢复。
   rec.sceneVersion = null;
   client.screenId = id;
+  client.devicesPending = false; // 投屏连接永不接收设备占用数据
   screens.set(id, rec);
 
   send(client.ws, { type: 'screen_hello', screen: publicScreen(rec) });
@@ -493,6 +501,21 @@ function remainingNow() {
 // ---------------------------------------------------------------------------
 const inspection = defaultInspection();
 
+// ---------------------------------------------------------------------------
+// 设备占用（devices）
+// 持有者可维护最多 20 项共享设备（名称 / 周转缓冲分钟），并把设备绑定到若干议程环节。
+// 每次议程、当前环节或计时状态变化后，复用同一帧权威 projectAgenda 推演结果计算
+// 各环节的预计起止区间；同一设备上按议程顺序相邻的两次占用空当不足周转缓冲时
+// 实时标出冲突双方与缺口分钟数，冲突按“最早发生”排序。固定开始环节与跨午夜
+// 时间由推演结果与线性时间轴展开保证正确比较。议程整体替换/环节删除时，绑定到
+// 已删除环节的记录自动清理。数据仅存服务端内存，进程重启即清空。
+// 设备消息按连接角色过滤：已注册为投屏的连接（首包之后）不再接收任何设备数据。
+// ---------------------------------------------------------------------------
+const deviceStore = defaultDevices(); // { seq, devices: [{ id, name, turnaroundMs, itemIds }] }
+// 最近一帧设备负载签名：占用区间/冲突随计时逐帧变化，仅在内容确实变化时下发，
+// 避免 200ms 周期快照把无变化的设备数据反复推给控制台。
+let lastDevicePayloadSignature = '';
+
 // 门禁失效原因的人读文案（同时下发 code，客户端可自行措辞）
 const GATE_REASON_TEXT = {
   fault: '存在必检项故障',
@@ -560,6 +583,66 @@ function agendaView() {
   return { cur: curRow, elapsedMs, projected, deviationMs };
 }
 
+// 设备占用负载：设备库 + 以同一帧权威推演结果计算的占用区间/冲突。
+// projectedRows 缺省时现场重算（首包/编辑设备等非计时路径），计时广播路径复用
+// 快照同一帧的 projectAgenda 结果，保证“冲突所用区间”与快照上的预计起止严格一致。
+function devicesPayload(projectedRows = null) {
+  const rows = projectedRows ?? agendaView().projected;
+  const occ = buildOccupancy(deviceStore.devices, rows);
+  return {
+    type: 'devices',
+    epoch,
+    seq: deviceStore.seq,
+    devices: occ.devices,
+    conflicts: occ.conflicts,
+    serverTimeMono: nowMono(),
+  };
+}
+
+// 已注册为投屏的连接不接收设备数据（与标记/巡检/场景库同级角色过滤）
+function sendDevicesIfChanged(force = false, projectedRows = null) {
+  const payload = devicesPayload(projectedRows);
+  // 签名剔除服务端时刻：占用区间/冲突/库内容变化才下发，逐帧 tick 无变化时不打扰
+  const sig = JSON.stringify({
+    seq: payload.seq,
+    devices: payload.devices,
+    conflicts: payload.conflicts,
+  });
+  if (!force && sig === lastDevicePayloadSignature) return;
+  lastDevicePayloadSignature = sig;
+  for (const c of clients) {
+    if (!c.screenId) send(c.ws, payload);
+  }
+}
+
+// 新控制台连接（或断线重连）首次以非投屏身份说话时，单播完整设备配置与冲突结果。
+// 投屏连接首条消息必为 screen_register，其待发标记在此被丢弃——投屏永不接收设备数据。
+function flushPendingDevices(client) {
+  if (!client.devicesPending) return;
+  client.devicesPending = false;
+  if (!client.screenId) send(client.ws, devicesPayload());
+}
+
+// 设备库编辑入口（仅持有者，由指令处理调用）：校验 + 自动清理已删除环节绑定。
+// 返回 { ok } 或 { error, message }。
+function saveDevices(rawItems) {
+  const result = normalizeDevices(rawItems);
+  if (result.error) return result;
+
+  // 议程整体替换/环节删除后，绑定到不存在环节的记录自动清理（客户端亦可重发裁剪后的清单）
+  const pruned = pruneMissingItems(result.devices, agenda.items);
+
+  const incomingSig = devicesSignature(pruned.devices);
+  const currentSig = devicesSignature(deviceStore.devices);
+  if (incomingSig === currentSig) {
+    return { ok: true, changed: false, seq: deviceStore.seq };
+  }
+
+  deviceStore.devices = pruned.devices;
+  deviceStore.seq += 1;
+  return { ok: true, changed: true, prunedCount: pruned.removed, seq: deviceStore.seq };
+}
+
 // warning（60 秒内）与 finished 是快照派生状态，进入临界值由 tick 驱动发播
 function buildSnapshot() {
   const remainingMs = remainingNow();
@@ -598,6 +681,9 @@ function broadcastSnapshot() {
   for (const client of clients) {
     send(client.ws, snap);
   }
+  // 占用区间/冲突随议程、当前环节、计时状态逐帧推演；设备负载只下发给控制台类连接，
+  // 且内容无变化（如待开始 idle 期的 tick）时不重复推送。
+  sendDevicesIfChanged(false, snap.agenda.items);
 }
 
 // ---------------------------------------------------------------------------
@@ -923,7 +1009,14 @@ function setAgenda(rawItems) {
   agenda.currentId = null;
   agenda.devInMs = 0;
   resetTimer(timer.durationMs);
-  return { ok: true, seq: agenda.seq };
+  // 绑定到被删除环节的设备记录自动清理（保留设备本身与其余绑定）；
+  // 确有清理时设备库版本递增，控制台据此对账。
+  const pruned = pruneMissingItems(deviceStore.devices, agenda.items);
+  if (pruned.removed > 0) {
+    deviceStore.devices = pruned.devices;
+    deviceStore.seq += 1;
+  }
+  return { ok: true, seq: agenda.seq, devicePruned: pruned.removed };
 }
 
 function setCurrent(id) {
@@ -980,6 +1073,10 @@ function fail(client, code, message) {
 
 function handleCommand(client, msg) {
   const cmd = msg.command;
+
+  // 控制台类连接首条指令到达时，补发改占用完整配置与冲突结果（断线重连恢复）。
+  // 投屏连接的首条指令必为 screen_register——不触发补发，并在注册时清掉待发标记。
+  if (cmd !== 'screen_register') flushPendingDevices(client);
 
   const PUBLIC_COMMANDS = new Set([
     'acquire', 'heartbeat', 'release',
@@ -1170,6 +1267,18 @@ function handleCommand(client, msg) {
       return;
     }
 
+    case 'devices_set': {
+      // 整体替换共享设备库（最多 20 项：名称 / 周转缓冲分钟 / 环节绑定）；
+      // 校验失败返回 BAD_DEVICES，服务端状态不变。绑定到已删除环节由服务端自动裁剪。
+      const r = saveDevices(msg.devices);
+      if (r.error) {
+        fail(client, r.error, r.message);
+        return;
+      }
+      if (r.changed) sendDevicesIfChanged(true);
+      return;
+    }
+
     case 'mark_add': {
       // 现场标记：记录瞬间固化归属环节与偏差（运行/暂停/超时/待开始均可记录）
       const r = addMarker(msg.name);
@@ -1309,6 +1418,9 @@ function makeClient(ws) {
     joinedMono: nowMono(),
     lastDenyAtMono: 0,
     screenId: null, // 若本连接注册为投屏，记录其屏幕 ID（每连接最多一块屏）
+    // 设备占用数据只发给控制台类连接：首条非投屏指令到达时补发完整负载；
+    // 若首条是 screen_register（投屏连接），该待发标记被丢弃，投屏永不接收设备数据。
+    devicesPending: true,
   };
   ws.on('message', (data) => {
     let msg;
